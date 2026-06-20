@@ -40,6 +40,51 @@ function speakText(text: string, rate = 1, pitch = 1) {
   window.speechSynthesis.speak(utter);
 }
 
+function playSE(grade: Grade) {
+  try {
+    const ctx = new AudioContext();
+    const note = (freq: number, start: number, dur: number, type: OscillatorType = "sine", vol = 0.3) => {
+      const osc = ctx.createOscillator();
+      const gain = ctx.createGain();
+      osc.connect(gain);
+      gain.connect(ctx.destination);
+      osc.type = type;
+      osc.frequency.setValueAtTime(freq, ctx.currentTime + start);
+      gain.gain.setValueAtTime(vol, ctx.currentTime + start);
+      gain.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + start + dur);
+      osc.start(ctx.currentTime + start);
+      osc.stop(ctx.currentTime + start + dur + 0.05);
+    };
+
+    if (grade === "A") {
+      // ピンポン！2音上昇チャイム
+      note(880, 0, 0.12);
+      note(1318, 0.14, 0.25);
+    } else if (grade === "B") {
+      // うーん…揺れる迷い音
+      const osc = ctx.createOscillator();
+      const gain = ctx.createGain();
+      osc.connect(gain);
+      gain.connect(ctx.destination);
+      osc.type = "sine";
+      osc.frequency.setValueAtTime(440, ctx.currentTime);
+      osc.frequency.linearRampToValueAtTime(380, ctx.currentTime + 0.3);
+      osc.frequency.linearRampToValueAtTime(410, ctx.currentTime + 0.5);
+      gain.gain.setValueAtTime(0.2, ctx.currentTime);
+      gain.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + 0.6);
+      osc.start(ctx.currentTime);
+      osc.stop(ctx.currentTime + 0.65);
+    } else {
+      // ガーン！重い下降
+      note(220, 0, 0.15, "sawtooth", 0.4);
+      note(160, 0.1, 0.4, "sawtooth", 0.35);
+      note(100, 0.25, 0.5, "square", 0.2);
+    }
+  } catch {
+    // AudioContext 非対応環境は無視
+  }
+}
+
 export default function Home() {
   const [state, setState] = useState<GameState>(INITIAL_STATE);
   const [bossMessage, setBossMessage] = useState("");
@@ -48,6 +93,7 @@ export default function Home() {
   const [judgeResult, setJudgeResult] = useState<JudgeResult | null>(null);
   const [isListening, setIsListening] = useState(false);
   const [isSpeechSupported, setIsSpeechSupported] = useState(false);
+  const [micError, setMicError] = useState<string | null>(null);
   const [textInput, setTextInput] = useState("");
   const [isLoading, setIsLoading] = useState(false);
   const [bossImg, setBossImg] = useState<string>(BOSS.idle);
@@ -55,6 +101,7 @@ export default function Home() {
 
   const recognitionRef = useRef<SpeechRecognition | null>(null);
   const audioUnlockedRef = useRef(false);
+  const textInputRef = useRef<HTMLInputElement | null>(null);
 
   // 画像プリロード
   useEffect(() => {
@@ -78,21 +125,42 @@ export default function Home() {
       window.webkitSpeechRecognition ?? window.SpeechRecognition;
     if (!SpeechRec) return;
 
+    setMicError(null);
+    setPlayerMessage("");
+    setInterimText("");
+
     const rec = new SpeechRec();
     rec.lang = "ja-JP";
     rec.interimResults = true;
-    rec.continuous = false;
+    rec.continuous = true;  // 無音で止まらないよう continuous に
+    rec.maxAlternatives = 1;
     recognitionRef.current = rec;
 
     rec.onstart = () => setIsListening(true);
+
     rec.onend = () => {
       setIsListening(false);
       recognitionRef.current = null;
     };
-    rec.onerror = () => {
+
+    rec.onerror = (e: SpeechRecognitionErrorEvent) => {
       setIsListening(false);
       recognitionRef.current = null;
+      const msgs: Record<string, string> = {
+        "not-allowed":   "マイクの使用が拒否されています。ブラウザのアドレスバー左のカメラ/マイクアイコンから許可してください。",
+        "audio-capture": "マイクが見つかりません。PCにマイクが接続されているか確認してください。",
+        "network":       "ネットワークエラーです。インターネット接続を確認してください。",
+        "no-speech":     "音声が検出されませんでした。もう一度マイクボタンを押して話してください。",
+        "aborted":       "",
+      };
+      const msg = msgs[e.error] ?? `音声認識エラー: ${e.error}`;
+      if (msg) {
+        setMicError(msg);
+        // エラー時はテキスト入力にフォーカスを移す
+        setTimeout(() => textInputRef.current?.focus(), 100);
+      }
     };
+
     rec.onresult = (e: SpeechRecognitionEvent) => {
       let interim = "";
       let final = "";
@@ -103,10 +171,11 @@ export default function Home() {
       }
       setInterimText(interim);
       if (final) {
-        setPlayerMessage(final.trim());
+        setPlayerMessage((prev) => (prev + final).trim());
         setInterimText("");
       }
     };
+
     rec.start();
   }, []);
 
@@ -211,6 +280,7 @@ export default function Home() {
         setJudgeResult(result);
         setBossImg(BOSS[result.grade]);
         setPiyoImg(result.grade === "A" ? PIYO.run : null);
+        playSE(result.grade);
         speakText(result.presidentComment, 0.75, 0.7);
 
         const { next } = applyResult(currentState, result.grade);
@@ -237,6 +307,27 @@ export default function Home() {
     }
   };
 
+  // デバッグ: 強制的に指定グレードで判定
+  const debugForceGrade = (grade: Grade) => {
+    if (isLoading) return;
+    const comments: Record<Grade, string> = {
+      A: "（デバッグ）さすがやわらか処世術！",
+      B: "（デバッグ）受け流してはいるが中身は？",
+      C: "（デバッグ）角が立ちすぎるぞ！",
+    };
+    const result: JudgeResult = {
+      grade,
+      presidentComment: comments[grade],
+      rationale: `debug:${grade}`,
+    };
+    setJudgeResult(result);
+    setBossImg(BOSS[grade]);
+    setPiyoImg(grade === "A" ? PIYO.run : null);
+    playSE(grade);
+    const { next } = applyResult(state, grade);
+    setState(next);
+  };
+
   const nextTurn = () => {
     if (state.phase !== "result") return;
     setPlayerMessage("");
@@ -250,11 +341,11 @@ export default function Home() {
   const phase: Phase = state.phase;
 
   return (
-    <div className="min-h-screen bg-amber-50 flex flex-col items-center justify-start p-2 font-sans">
+    <div className="h-screen w-screen bg-amber-50 flex flex-col overflow-hidden font-sans">
 
       {/* ── タイトル画面 ── */}
       {phase === "title" && (
-        <div className="flex flex-col items-center justify-center min-h-screen gap-8 text-center">
+        <div className="flex flex-col items-center justify-center h-full gap-6 text-center p-4">
           <div className="bg-white rounded-3xl shadow-xl p-8 max-w-md w-full">
             <h1 className="text-3xl font-bold text-amber-800 mb-1">
               やわらか出世道場
@@ -289,55 +380,57 @@ export default function Home() {
 
       {/* ── ゲーム画面 ── */}
       {phase !== "title" && phase !== "win" && phase !== "lose" && (
-        <div className="w-full max-w-2xl mt-2 flex flex-col gap-3">
+        <div className="flex flex-col h-full w-full items-center overflow-hidden py-2 px-4">
+        <div className="flex flex-col h-full w-[70%] gap-2">
 
-          {/* [1] ステータス */}
-          <div className="bg-white rounded-2xl shadow p-3 flex items-start gap-4">
-            <div className="flex flex-col gap-1 min-w-[72px]">
-              {[...RANK].reverse().map((r, i) => {
-                const rankIdx = RANK.length - 1 - i;
-                const isActive = rankIdx === state.promotion;
-                const isPassed = rankIdx < state.promotion;
-                return (
+          {/* [1] ステータスバー（大きめ・2列） */}
+          <div className="bg-white rounded-2xl shadow px-4 py-3 flex gap-6 flex-shrink-0">
+            {/* ランク進捗 */}
+            <div className="flex-1">
+              <p className="text-xs font-bold text-gray-500 mb-2">出世ランク</p>
+              <div className="flex gap-2">
+                {RANK.map((r, i) => (
                   <div
                     key={r}
-                    className={`text-xs px-2 py-1 rounded-lg text-center font-semibold transition-all ${
-                      isActive
-                        ? "bg-amber-400 text-white scale-105 shadow"
-                        : isPassed
-                        ? "bg-green-100 text-green-700"
+                    className={`flex-1 py-1.5 rounded-xl text-center font-bold text-sm transition-all ${
+                      i === state.promotion
+                        ? "bg-amber-400 text-white shadow-md scale-105"
+                        : i < state.promotion
+                        ? "bg-green-200 text-green-800"
                         : "bg-gray-100 text-gray-400"
                     }`}
                   >
                     {r}
+                    {i === state.promotion && <span className="block text-[10px] font-normal">← 現在</span>}
                   </div>
-                );
-              })}
+                ))}
+              </div>
+              {state.promotion > 0 && (
+                <p className="text-xs text-green-600 mt-1.5">A連続: {state.promotion}回 / あと{3 - state.promotion}回で昇進！</p>
+              )}
             </div>
-            <div className="flex-1">
-              <p className="text-xs text-gray-500 mb-1">上司の忍耐ゲージ</p>
-              <div className="flex gap-1 mb-1">
+            {/* 忍耐ゲージ */}
+            <div className="flex-shrink-0 w-40">
+              <p className="text-xs font-bold text-gray-500 mb-2">上司の忍耐ゲージ</p>
+              <div className="flex gap-2 mb-1.5">
                 {Array.from({ length: PATIENCE_MAX }).map((_, i) => (
                   <div
                     key={i}
-                    className={`flex-1 h-4 rounded-full border transition-all ${
+                    className={`flex-1 h-6 rounded-lg border-2 transition-all ${
                       i < state.patience
-                        ? "bg-red-400 border-red-500"
+                        ? "bg-red-400 border-red-500 shadow-sm"
                         : "bg-gray-100 border-gray-200"
                     }`}
                   />
                 ))}
               </div>
-              <p className="text-xs text-gray-400">
-                {state.patience > 0
-                  ? `C判定 ${state.patience}回 — あと${PATIENCE_MAX - state.patience}回で転勤！`
+              <p className={`text-xs font-semibold ${state.patience > 0 ? "text-red-500" : "text-gray-400"}`}>
+                {state.patience >= PATIENCE_MAX - 1 && state.patience < PATIENCE_MAX
+                  ? "⚠️ 次でアウト！"
+                  : state.patience > 0
+                  ? `C判定 ${state.patience}回 — あと${PATIENCE_MAX - state.patience}回`
                   : "まだ余裕あり"}
               </p>
-              {state.promotion > 0 && (
-                <p className="text-xs text-green-600 mt-1">
-                  連続A: {state.promotion}回 / あと{3 - state.promotion}回で昇進
-                </p>
-              )}
             </div>
           </div>
 
@@ -352,7 +445,7 @@ export default function Home() {
               unoptimized
             />
             <div className="flex-1">
-              <p className="text-xs text-gray-400 mb-1">課長・セキナリア</p>
+              <p className="text-xs text-gray-400 mb-1">セキトリくん（上司）</p>
               {isLoading && phase === "bossTurn" ? (
                 <p className="text-gray-400 text-sm animate-pulse">考え中…</p>
               ) : (
@@ -364,7 +457,7 @@ export default function Home() {
           </div>
 
           {/* [3] 部下エリア */}
-          <div className="bg-white rounded-2xl shadow p-3 flex gap-3 items-start">
+          <div className="bg-white rounded-2xl shadow p-3 flex gap-3 items-start flex-1 min-h-0">
             {piyoImg && (
               <Image
                 src={piyoImg}
@@ -376,7 +469,7 @@ export default function Home() {
               />
             )}
             <div className="flex-1">
-              <p className="text-xs text-gray-400 mb-1">セキとえと（あなた）</p>
+              <p className="text-xs text-gray-400 mb-1">セキピヨくん（あなた）</p>
               <div
                 className={`rounded-xl p-2 text-sm min-h-[44px] border transition-colors ${
                   isListening
@@ -412,44 +505,69 @@ export default function Home() {
           {/* [4] 入力エリア */}
           {phase === "listening" && (
             <div className="bg-white rounded-2xl shadow p-3 flex flex-col gap-2">
-              <div className="flex gap-2">
+              {/* マイクボタン行 */}
+              <div className="flex gap-2 items-center">
                 {isSpeechSupported && (
                   <button
                     onClick={toggleMic}
-                    className={`flex-shrink-0 w-12 h-12 rounded-full flex items-center justify-center text-xl shadow transition-all ${
+                    className={`flex-shrink-0 w-14 h-14 rounded-full flex flex-col items-center justify-center shadow transition-all ${
                       isListening
-                        ? "bg-red-500 text-white animate-pulse"
+                        ? "bg-red-500 text-white scale-110"
                         : "bg-gray-100 hover:bg-gray-200 text-gray-600"
                     }`}
-                    title={isListening ? "停止" : "マイク入力"}
+                    title={isListening ? "クリックで停止" : "マイクで入力"}
                   >
-                    🎤
+                    <span className="text-xl">{isListening ? "⏹" : "🎤"}</span>
+                    <span className="text-[9px] mt-0.5 leading-none">
+                      {isListening ? "停止" : "マイク"}
+                    </span>
                   </button>
                 )}
-                <form onSubmit={handleTextSubmit} className="flex flex-1 gap-2">
-                  <input
-                    type="text"
-                    value={textInput}
-                    onChange={(e) => setTextInput(e.target.value)}
-                    placeholder="テキストで返答を入力…"
-                    className="flex-1 border border-gray-300 rounded-xl px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-amber-400"
-                  />
-                  <button
-                    type="submit"
-                    disabled={!textInput.trim() || isLoading}
-                    className="bg-amber-500 hover:bg-amber-600 disabled:opacity-40 text-white px-4 py-2 rounded-xl text-sm font-bold transition-colors"
-                  >
-                    ✈ 送信
-                  </button>
-                </form>
+                <div className="flex-1 text-xs text-gray-500 leading-relaxed">
+                  {isListening ? (
+                    <span className="text-red-500 font-semibold animate-pulse">
+                      ● 録音中 — 話し終わったら「停止」を押してください
+                    </span>
+                  ) : (
+                    <span>マイクボタンを押して話すか、下のテキストで入力</span>
+                  )}
+                </div>
               </div>
+
+              {/* マイクエラー表示 */}
+              {micError && (
+                <div className="bg-red-50 border border-red-200 rounded-xl p-2 text-xs text-red-700">
+                  {micError}
+                </div>
+              )}
+
+              {/* テキスト入力 */}
+              <form onSubmit={handleTextSubmit} className="flex gap-2">
+                <input
+                  ref={textInputRef}
+                  type="text"
+                  value={textInput}
+                  onChange={(e) => setTextInput(e.target.value)}
+                  placeholder="テキストで返答を入力…"
+                  className="flex-1 border border-gray-300 rounded-xl px-3 py-2 text-sm text-gray-900 bg-white focus:outline-none focus:ring-2 focus:ring-amber-400"
+                />
+                <button
+                  type="submit"
+                  disabled={!textInput.trim() || isLoading}
+                  className="bg-amber-500 hover:bg-amber-600 disabled:opacity-40 text-white px-4 py-2 rounded-xl text-sm font-bold transition-colors"
+                >
+                  送信
+                </button>
+              </form>
+
+              {/* 音声入力後の確定ボタン */}
               {playerMessage && !isListening && (
                 <button
                   onClick={handleMicSubmit}
                   disabled={isLoading}
                   className="w-full bg-blue-500 hover:bg-blue-600 disabled:opacity-40 text-white py-2 rounded-xl font-bold text-sm transition-colors"
                 >
-                  この返答で判定する →
+                  「{playerMessage.slice(0, 20)}{playerMessage.length > 20 ? "…" : ""}」で判定する →
                 </button>
               )}
             </div>
@@ -465,11 +583,12 @@ export default function Home() {
             </button>
           )}
         </div>
+        </div>
       )}
 
       {/* ── WIN エンド ── */}
       {phase === "win" && (
-        <div className="flex flex-col items-center justify-center min-h-screen">
+        <div className="flex flex-col items-center justify-center h-full p-4">
           <div className="bg-white rounded-3xl shadow-xl p-8 max-w-sm w-full text-center">
             <div className="flex justify-center gap-4 mb-4">
               <Image src={PIYO.run} alt="部下" width={110} height={110} className="object-contain" unoptimized />
@@ -490,9 +609,32 @@ export default function Home() {
         </div>
       )}
 
+      {/* ── デバッグボタン（左下固定・入力と重ならない位置）── */}
+      {phase !== "title" && phase !== "win" && phase !== "lose" && (
+        <div className="fixed bottom-6 left-4 flex flex-row gap-2 z-50 bg-white/80 backdrop-blur-sm rounded-2xl px-3 py-2 shadow-md border border-gray-200">
+          <p className="text-[10px] text-gray-400 self-center mr-1">DEBUG</p>
+          {(["A", "B", "C"] as Grade[]).map((g) => (
+            <button
+              key={g}
+              onClick={() => debugForceGrade(g)}
+              disabled={isLoading || phase === "judging"}
+              className={`w-10 h-10 rounded-full font-black text-sm shadow border-2 disabled:opacity-30 transition-all ${
+                g === "A"
+                  ? "bg-green-100 border-green-400 text-green-700 hover:bg-green-200"
+                  : g === "B"
+                  ? "bg-yellow-100 border-yellow-400 text-yellow-700 hover:bg-yellow-200"
+                  : "bg-red-100 border-red-400 text-red-700 hover:bg-red-200"
+              }`}
+            >
+              {g}
+            </button>
+          ))}
+        </div>
+      )}
+
       {/* ── LOSE エンド ── */}
       {phase === "lose" && (
-        <div className="flex flex-col items-center justify-center min-h-screen">
+        <div className="flex flex-col items-center justify-center h-full p-4">
           <div className="bg-white rounded-3xl shadow-xl p-8 max-w-sm w-full text-center">
             <div className="flex justify-center gap-4 mb-4">
               <Image src={BOSS.victory} alt="上司" width={110} height={110} className="object-contain" unoptimized />
