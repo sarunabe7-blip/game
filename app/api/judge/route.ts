@@ -176,8 +176,12 @@ export async function POST(req: NextRequest) {
     const raw =
       msg.content[0].type === "text" ? msg.content[0].text : "";
     return NextResponse.json(parseJudge(raw));
-  } catch {
+  } catch (e) {
     clearTimeout(timer);
-    return NextResponse.json(JUDGE_FALLBACK);
+    const errMsg = e instanceof Error ? e.message : String(e);
+    return NextResponse.json({
+      ...JUDGE_FALLBACK,
+      rationale: `ERR: ${errMsg.slice(0, 80)}`,
+    });
   }
 }
