@@ -4,7 +4,7 @@ import { JUDGE_FALLBACK } from "@/lib/fallbacks";
 import type { Grade } from "@/lib/gameLogic";
 
 export const runtime = "nodejs";
-export const maxDuration = 30;
+export const maxDuration = 10;
 
 const client = new Anthropic();
 
@@ -157,12 +157,12 @@ export async function POST(req: NextRequest) {
   }
 
   const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), 25000);
+  const timer = setTimeout(() => controller.abort(), 8000);
 
   try {
     const msg = await client.messages.create(
       {
-        model: "claude-sonnet-4-6",
+        model: "claude-haiku-4-5",
         max_tokens: 300,
         temperature: 0.2,
         system: SYSTEM,

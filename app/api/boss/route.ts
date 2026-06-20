@@ -3,7 +3,7 @@ import Anthropic from "@anthropic-ai/sdk";
 import { BOSS_FALLBACK } from "@/lib/fallbacks";
 
 export const runtime = "nodejs";
-export const maxDuration = 30;
+export const maxDuration = 10;
 
 const client = new Anthropic();
 
@@ -28,7 +28,7 @@ export async function POST(req: NextRequest) {
   const { difficulty = 1 } = await req.json().catch(() => ({}));
 
   const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), 12000);
+  const timer = setTimeout(() => controller.abort(), 8000);
 
   try {
     const msg = await client.messages.create(
