@@ -1,65 +1,517 @@
+"use client";
+
+import { useEffect, useRef, useState, useCallback } from "react";
 import Image from "next/image";
+import { BOSS, PIYO, ALL_IMAGES } from "@/lib/characters";
+import {
+  applyResult,
+  INITIAL_STATE,
+  PATIENCE_MAX,
+  RANK,
+  type GameState,
+  type Grade,
+  type Phase,
+} from "@/lib/gameLogic";
+
+interface JudgeResult {
+  grade: Grade;
+  presidentComment: string;
+  rationale: string;
+}
+
+function gradeColor(g: Grade) {
+  return g === "A"
+    ? "text-green-700 bg-green-50 border-green-300"
+    : g === "B"
+    ? "text-yellow-700 bg-yellow-50 border-yellow-300"
+    : "text-red-700 bg-red-50 border-red-300";
+}
+
+function speakText(text: string, rate = 1, pitch = 1) {
+  if (typeof window === "undefined") return;
+  window.speechSynthesis.cancel();
+  const utter = new SpeechSynthesisUtterance(text);
+  utter.lang = "ja-JP";
+  utter.rate = rate;
+  utter.pitch = pitch;
+  const voices = window.speechSynthesis.getVoices();
+  const ja = voices.find((v) => v.lang.startsWith("ja"));
+  if (ja) utter.voice = ja;
+  window.speechSynthesis.speak(utter);
+}
 
 export default function Home() {
+  const [state, setState] = useState<GameState>(INITIAL_STATE);
+  const [bossMessage, setBossMessage] = useState("");
+  const [playerMessage, setPlayerMessage] = useState("");
+  const [interimText, setInterimText] = useState("");
+  const [judgeResult, setJudgeResult] = useState<JudgeResult | null>(null);
+  const [isListening, setIsListening] = useState(false);
+  const [isSpeechSupported, setIsSpeechSupported] = useState(false);
+  const [textInput, setTextInput] = useState("");
+  const [isLoading, setIsLoading] = useState(false);
+  const [bossImg, setBossImg] = useState<string>(BOSS.idle);
+  const [piyoImg, setPiyoImg] = useState<string | null>(null);
+
+  const recognitionRef = useRef<SpeechRecognition | null>(null);
+  const audioUnlockedRef = useRef(false);
+
+  // 画像プリロード
+  useEffect(() => {
+    ALL_IMAGES.forEach((src) => {
+      const img = new window.Image();
+      img.src = src;
+    });
+  }, []);
+
+  // Speech API 初期化
+  useEffect(() => {
+    setIsSpeechSupported(
+      !!(window.webkitSpeechRecognition ?? window.SpeechRecognition)
+    );
+    window.speechSynthesis.onvoiceschanged = () =>
+      window.speechSynthesis.getVoices();
+  }, []);
+
+  const startListening = useCallback(() => {
+    const SpeechRec =
+      window.webkitSpeechRecognition ?? window.SpeechRecognition;
+    if (!SpeechRec) return;
+
+    const rec = new SpeechRec();
+    rec.lang = "ja-JP";
+    rec.interimResults = true;
+    rec.continuous = false;
+    recognitionRef.current = rec;
+
+    rec.onstart = () => setIsListening(true);
+    rec.onend = () => {
+      setIsListening(false);
+      recognitionRef.current = null;
+    };
+    rec.onerror = () => {
+      setIsListening(false);
+      recognitionRef.current = null;
+    };
+    rec.onresult = (e: SpeechRecognitionEvent) => {
+      let interim = "";
+      let final = "";
+      for (let i = e.resultIndex; i < e.results.length; i++) {
+        const t = e.results[i][0].transcript;
+        if (e.results[i].isFinal) final += t;
+        else interim += t;
+      }
+      setInterimText(interim);
+      if (final) {
+        setPlayerMessage(final.trim());
+        setInterimText("");
+      }
+    };
+    rec.start();
+  }, []);
+
+  const stopListening = useCallback(() => {
+    recognitionRef.current?.stop();
+    setIsListening(false);
+  }, []);
+
+  const toggleMic = () => {
+    if (isListening) {
+      stopListening();
+    } else {
+      setPlayerMessage("");
+      setInterimText("");
+      startListening();
+    }
+  };
+
+  const unlockAudio = () => {
+    if (audioUnlockedRef.current) return;
+    audioUnlockedRef.current = true;
+    window.speechSynthesis.speak(new SpeechSynthesisUtterance(""));
+  };
+
+  const fetchBossMessage = useCallback(async (gs: GameState) => {
+    setIsLoading(true);
+    setBossImg(gs.patience >= PATIENCE_MAX - 1 ? BOSS.boast : BOSS.idle);
+    setPiyoImg(null);
+
+    const difficulty = Math.min(3, 1 + gs.promotion + gs.patience);
+    const isDemo =
+      typeof window !== "undefined" &&
+      new URLSearchParams(window.location.search).get("demo") === "1";
+
+    try {
+      let msg = "";
+      if (isDemo) {
+        const demos = [
+          "明日までにこの100ページの資料まとめといて",
+          "俺の悪口言ってるの聞こえたけど",
+          "例の件もっと前倒しにしてよ、もちろんできるよね？",
+        ];
+        msg = demos[Math.floor(Math.random() * demos.length)];
+      } else {
+        const res = await fetch("/api/boss", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ difficulty }),
+        });
+        msg = (await res.json()).bossMessage;
+      }
+
+      setBossMessage(msg);
+      speakText(msg, 0.85, 1.2);
+      setState((prev) => ({ ...prev, phase: "listening" }));
+    } finally {
+      setIsLoading(false);
+    }
+  }, []);
+
+  const startGame = async () => {
+    unlockAudio();
+    const next: GameState = { ...INITIAL_STATE, phase: "bossTurn" };
+    setState(next);
+    setJudgeResult(null);
+    setPlayerMessage("");
+    setInterimText("");
+    setTextInput("");
+    await fetchBossMessage(next);
+  };
+
+  const submitAnswer = useCallback(
+    async (answer: string, currentState: GameState) => {
+      if (!answer.trim() || isLoading) return;
+      setState((prev) => ({ ...prev, phase: "judging" }));
+      setPiyoImg(PIYO.thinking);
+      setBossImg(BOSS.idle);
+      setIsLoading(true);
+
+      const isDemo =
+        typeof window !== "undefined" &&
+        new URLSearchParams(window.location.search).get("demo") === "1";
+
+      try {
+        let result: JudgeResult;
+        if (isDemo) {
+          const demos: JudgeResult[] = [
+            { grade: "C", presidentComment: "その言い方、油に火をつけるな！", rationale: "C demo" },
+            { grade: "B", presidentComment: "受け流してはいるが……良さはどこへ行った？", rationale: "B demo" },
+            { grade: "A", presidentComment: "……課長の種を空けてあげたね。", rationale: "A demo" },
+          ];
+          result = demos[Math.floor(Math.random() * demos.length)];
+        } else {
+          const res = await fetch("/api/judge", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ bossMessage, playerMessage: answer }),
+          });
+          result = await res.json();
+        }
+
+        setJudgeResult(result);
+        setBossImg(BOSS[result.grade]);
+        setPiyoImg(result.grade === "A" ? PIYO.run : null);
+        speakText(result.presidentComment, 0.75, 0.7);
+
+        const { next } = applyResult(currentState, result.grade);
+        setState(next);
+      } finally {
+        setIsLoading(false);
+      }
+    },
+    [isLoading, bossMessage]
+  );
+
+  const handleTextSubmit = (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!textInput.trim()) return;
+    const msg = textInput.trim();
+    setPlayerMessage(msg);
+    setTextInput("");
+    submitAnswer(msg, state);
+  };
+
+  const handleMicSubmit = () => {
+    if (playerMessage.trim()) {
+      submitAnswer(playerMessage, state);
+    }
+  };
+
+  const nextTurn = () => {
+    if (state.phase !== "result") return;
+    setPlayerMessage("");
+    setInterimText("");
+    setJudgeResult(null);
+    const next: GameState = { ...state, phase: "bossTurn" };
+    setState(next);
+    fetchBossMessage(next);
+  };
+
+  const phase: Phase = state.phase;
+
   return (
-    <div className="flex flex-col flex-1 items-center justify-center bg-zinc-50 font-sans dark:bg-black">
-      <main className="flex flex-1 w-full max-w-3xl flex-col items-center justify-between py-32 px-16 bg-white dark:bg-black sm:items-start">
-        <Image
-          className="dark:invert"
-          src="/next.svg"
-          alt="Next.js logo"
-          width={100}
-          height={20}
-          priority
-        />
-        <div className="flex flex-col items-center gap-6 text-center sm:items-start sm:text-left">
-          <h1 className="max-w-xs text-3xl font-semibold leading-10 tracking-tight text-black dark:text-zinc-50">
-            To get started, edit the page.tsx file.
-          </h1>
-          <p className="max-w-md text-lg leading-8 text-zinc-600 dark:text-zinc-400">
-            Looking for a starting point or more instructions? Head over to{" "}
-            <a
-              href="https://vercel.com/templates?framework=next.js&utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-              className="font-medium text-zinc-950 dark:text-zinc-50"
+    <div className="min-h-screen bg-amber-50 flex flex-col items-center justify-start p-2 font-sans">
+
+      {/* ── タイトル画面 ── */}
+      {phase === "title" && (
+        <div className="flex flex-col items-center justify-center min-h-screen gap-8 text-center">
+          <div className="bg-white rounded-3xl shadow-xl p-8 max-w-md w-full">
+            <h1 className="text-3xl font-bold text-amber-800 mb-1">
+              やわらか出世道場
+            </h1>
+            <p className="text-amber-600 text-sm mb-5">ビジネス会話ゲーム</p>
+            <div className="flex justify-center mb-5">
+              <Image
+                src={BOSS.idle}
+                alt="上司"
+                width={160}
+                height={160}
+                className="object-contain"
+                unoptimized
+              />
+            </div>
+            <p className="text-gray-600 text-sm mb-6 leading-relaxed">
+              上司の無茶ぶりを「やわらか」に受け流し、<br />
+              部長昇進を目指せ！<br />
+              <span className="text-xs text-gray-400 block mt-1">
+                A×3連続で昇進 / C×3で転勤エンド
+              </span>
+            </p>
+            <button
+              onClick={startGame}
+              className="w-full bg-amber-500 hover:bg-amber-600 text-white font-bold py-3 px-6 rounded-2xl text-lg shadow transition-colors"
             >
-              Templates
-            </a>{" "}
-            or the{" "}
-            <a
-              href="https://nextjs.org/learn?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-              className="font-medium text-zinc-950 dark:text-zinc-50"
-            >
-              Learning
-            </a>{" "}
-            center.
-          </p>
+              ゲームスタート
+            </button>
+          </div>
         </div>
-        <div className="flex flex-col gap-4 text-base font-medium sm:flex-row">
-          <a
-            className="flex h-12 w-full items-center justify-center gap-2 rounded-full bg-foreground px-5 text-background transition-colors hover:bg-[#383838] dark:hover:bg-[#ccc] md:w-[158px]"
-            href="https://vercel.com/new?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-            target="_blank"
-            rel="noopener noreferrer"
-          >
+      )}
+
+      {/* ── ゲーム画面 ── */}
+      {phase !== "title" && phase !== "win" && phase !== "lose" && (
+        <div className="w-full max-w-2xl mt-2 flex flex-col gap-3">
+
+          {/* [1] ステータス */}
+          <div className="bg-white rounded-2xl shadow p-3 flex items-start gap-4">
+            <div className="flex flex-col gap-1 min-w-[72px]">
+              {[...RANK].reverse().map((r, i) => {
+                const rankIdx = RANK.length - 1 - i;
+                const isActive = rankIdx === state.promotion;
+                const isPassed = rankIdx < state.promotion;
+                return (
+                  <div
+                    key={r}
+                    className={`text-xs px-2 py-1 rounded-lg text-center font-semibold transition-all ${
+                      isActive
+                        ? "bg-amber-400 text-white scale-105 shadow"
+                        : isPassed
+                        ? "bg-green-100 text-green-700"
+                        : "bg-gray-100 text-gray-400"
+                    }`}
+                  >
+                    {r}
+                  </div>
+                );
+              })}
+            </div>
+            <div className="flex-1">
+              <p className="text-xs text-gray-500 mb-1">上司の忍耐ゲージ</p>
+              <div className="flex gap-1 mb-1">
+                {Array.from({ length: PATIENCE_MAX }).map((_, i) => (
+                  <div
+                    key={i}
+                    className={`flex-1 h-4 rounded-full border transition-all ${
+                      i < state.patience
+                        ? "bg-red-400 border-red-500"
+                        : "bg-gray-100 border-gray-200"
+                    }`}
+                  />
+                ))}
+              </div>
+              <p className="text-xs text-gray-400">
+                {state.patience > 0
+                  ? `C判定 ${state.patience}回 — あと${PATIENCE_MAX - state.patience}回で転勤！`
+                  : "まだ余裕あり"}
+              </p>
+              {state.promotion > 0 && (
+                <p className="text-xs text-green-600 mt-1">
+                  連続A: {state.promotion}回 / あと{3 - state.promotion}回で昇進
+                </p>
+              )}
+            </div>
+          </div>
+
+          {/* [2] 上司セリフ */}
+          <div className="bg-white rounded-2xl shadow p-3 flex gap-3 items-start">
             <Image
-              className="dark:invert"
-              src="/vercel.svg"
-              alt="Vercel logomark"
-              width={16}
-              height={16}
+              src={bossImg}
+              alt="上司"
+              width={110}
+              height={110}
+              className="object-contain rounded-xl flex-shrink-0"
+              unoptimized
             />
-            Deploy Now
-          </a>
-          <a
-            className="flex h-12 w-full items-center justify-center rounded-full border border-solid border-black/[.08] px-5 transition-colors hover:border-transparent hover:bg-black/[.04] dark:border-white/[.145] dark:hover:bg-[#1a1a1a] md:w-[158px]"
-            href="https://nextjs.org/docs?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-            target="_blank"
-            rel="noopener noreferrer"
-          >
-            Documentation
-          </a>
+            <div className="flex-1">
+              <p className="text-xs text-gray-400 mb-1">課長・セキナリア</p>
+              {isLoading && phase === "bossTurn" ? (
+                <p className="text-gray-400 text-sm animate-pulse">考え中…</p>
+              ) : (
+                <div className="bg-amber-50 border border-amber-100 rounded-xl p-2 text-sm text-gray-800 leading-relaxed">
+                  {bossMessage || "…"}
+                </div>
+              )}
+            </div>
+          </div>
+
+          {/* [3] 部下エリア */}
+          <div className="bg-white rounded-2xl shadow p-3 flex gap-3 items-start">
+            {piyoImg && (
+              <Image
+                src={piyoImg}
+                alt="部下"
+                width={90}
+                height={90}
+                className="object-contain rounded-xl flex-shrink-0"
+                unoptimized
+              />
+            )}
+            <div className="flex-1">
+              <p className="text-xs text-gray-400 mb-1">セキとえと（あなた）</p>
+              <div
+                className={`rounded-xl p-2 text-sm min-h-[44px] border transition-colors ${
+                  isListening
+                    ? "border-red-300 bg-red-50 text-gray-700"
+                    : "border-gray-200 bg-gray-50 text-gray-600"
+                }`}
+              >
+                {isListening && interimText
+                  ? interimText
+                  : playerMessage
+                  ? playerMessage
+                  : phase === "judging"
+                  ? "社長が評価中…"
+                  : phase === "listening"
+                  ? "マイクで話すか、下のテキストで入力してください"
+                  : ""}
+              </div>
+            </div>
+          </div>
+
+          {/* [5] 社長コメント */}
+          {judgeResult && phase === "result" && (
+            <div className={`rounded-2xl shadow p-3 border text-sm ${gradeColor(judgeResult.grade)}`}>
+              <p className="font-bold text-xs mb-1">
+                社長の評価：
+                <span className="text-xl ml-1 font-black">{judgeResult.grade}</span>
+                <span className="text-xs ml-2 opacity-60">{judgeResult.rationale}</span>
+              </p>
+              <p className="leading-relaxed">{judgeResult.presidentComment}</p>
+            </div>
+          )}
+
+          {/* [4] 入力エリア */}
+          {phase === "listening" && (
+            <div className="bg-white rounded-2xl shadow p-3 flex flex-col gap-2">
+              <div className="flex gap-2">
+                {isSpeechSupported && (
+                  <button
+                    onClick={toggleMic}
+                    className={`flex-shrink-0 w-12 h-12 rounded-full flex items-center justify-center text-xl shadow transition-all ${
+                      isListening
+                        ? "bg-red-500 text-white animate-pulse"
+                        : "bg-gray-100 hover:bg-gray-200 text-gray-600"
+                    }`}
+                    title={isListening ? "停止" : "マイク入力"}
+                  >
+                    🎤
+                  </button>
+                )}
+                <form onSubmit={handleTextSubmit} className="flex flex-1 gap-2">
+                  <input
+                    type="text"
+                    value={textInput}
+                    onChange={(e) => setTextInput(e.target.value)}
+                    placeholder="テキストで返答を入力…"
+                    className="flex-1 border border-gray-300 rounded-xl px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-amber-400"
+                  />
+                  <button
+                    type="submit"
+                    disabled={!textInput.trim() || isLoading}
+                    className="bg-amber-500 hover:bg-amber-600 disabled:opacity-40 text-white px-4 py-2 rounded-xl text-sm font-bold transition-colors"
+                  >
+                    ✈ 送信
+                  </button>
+                </form>
+              </div>
+              {playerMessage && !isListening && (
+                <button
+                  onClick={handleMicSubmit}
+                  disabled={isLoading}
+                  className="w-full bg-blue-500 hover:bg-blue-600 disabled:opacity-40 text-white py-2 rounded-xl font-bold text-sm transition-colors"
+                >
+                  この返答で判定する →
+                </button>
+              )}
+            </div>
+          )}
+
+          {phase === "result" && (
+            <button
+              onClick={nextTurn}
+              disabled={isLoading}
+              className="w-full bg-amber-500 hover:bg-amber-600 disabled:opacity-40 text-white py-3 rounded-2xl font-bold shadow transition-colors"
+            >
+              次のターンへ →
+            </button>
+          )}
         </div>
-      </main>
+      )}
+
+      {/* ── WIN エンド ── */}
+      {phase === "win" && (
+        <div className="flex flex-col items-center justify-center min-h-screen">
+          <div className="bg-white rounded-3xl shadow-xl p-8 max-w-sm w-full text-center">
+            <div className="flex justify-center gap-4 mb-4">
+              <Image src={PIYO.run} alt="部下" width={110} height={110} className="object-contain" unoptimized />
+              <Image src={BOSS.defeated} alt="上司" width={110} height={110} className="object-contain" unoptimized />
+            </div>
+            <h2 className="text-2xl font-bold text-green-700 mb-2">部長昇進！おめでとう！</h2>
+            <p className="text-gray-600 text-sm mb-6">
+              真の処世術で上司を追い越した！<br />
+              これからも「やわらか」に行こう。
+            </p>
+            <button
+              onClick={startGame}
+              className="w-full bg-green-500 hover:bg-green-600 text-white font-bold py-3 rounded-2xl transition-colors"
+            >
+              もう一度プレイ
+            </button>
+          </div>
+        </div>
+      )}
+
+      {/* ── LOSE エンド ── */}
+      {phase === "lose" && (
+        <div className="flex flex-col items-center justify-center min-h-screen">
+          <div className="bg-white rounded-3xl shadow-xl p-8 max-w-sm w-full text-center">
+            <div className="flex justify-center gap-4 mb-4">
+              <Image src={BOSS.victory} alt="上司" width={110} height={110} className="object-contain" unoptimized />
+              <Image src={PIYO.run} alt="部下" width={110} height={110} className="object-contain" unoptimized />
+            </div>
+            <h2 className="text-2xl font-bold text-red-700 mb-2">地方転勤エンド</h2>
+            <p className="text-gray-600 text-sm mb-6">
+              上司の忍耐が限界に…<br />
+              「やわらか」な受け流しをマスターしよう！
+            </p>
+            <button
+              onClick={startGame}
+              className="w-full bg-red-500 hover:bg-red-600 text-white font-bold py-3 rounded-2xl transition-colors"
+            >
+              もう一度挑戦
+            </button>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
